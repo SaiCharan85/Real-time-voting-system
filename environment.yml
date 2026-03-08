@@ -1,0 +1,20 @@
+# for setting up conda environment
+name: voting-system
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.9
+  - pip
+  - pandas
+  - numpy
+  - psycopg2
+  - requests
+  - streamlit
+  - pyspark=3.5.0
+  - matplotlib
+  - pip:
+    - confluent-kafka
+    - streamlit-autorefresh
+    - simplejson
+    - kafka-python

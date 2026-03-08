@@ -1,0 +1,80 @@
+# docker-compose.yml
+version: '3.8'
+services:
+  postgres:
+    image: postgres:latest
+    container_name: voting_postgres
+    environment:
+      POSTGRES_DB: voting
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - voting_network
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:latest
+    container_name: voting_zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+    networks:
+      - voting_network
+
+  kafka:
+    image: confluentinc/cp-kafka:latest
+    container_name: voting_kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 2                 #replica for each _consumer_offsets partition required for fault tolerance
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1                    #Transactions succeed with only one replica(leader) in-sync that acknowledges them
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 2         #replica for each _transaction_state partition required for fault tolerance
+      KAFKA_CONFLUENT_LICENSE_TOPIC_REPLICATION_FACTOR: 2       #replica for each _confluent_license partition required for fault tolerance on the licensing information
+      KAFKA_CONFLUENT_BALANCER_TOPIC_REPLICATION_FACTOR: 2      #replica to recover the cluster balancer in case the leader broker fails
+    networks:
+      - voting_network
+
+spark-master:
+    image: bitnami/spark:latest
+    command: bin/spark-class org.apache.spark.deploy.master.Master
+    container_name: spark-master
+    ports:
+      - "8081:8080"  # Web UI
+      - "6066:6066"  # REST Client Port
+      - "7077:7077"  # Worker Communication Port
+    networks:
+      - voting_network
+
+  spark-worker:
+    image: bitnami/spark:latest
+    command: bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
+    container_name: spark-worker
+    depends_on:
+      - spark-master
+    environment:
+      SPARK_MODE: worker
+      SPARK_WORKER_CORES: 4
+      SPARK_WORKER_MEMORY: 2g
+      SPARK_MASTER_URL: spark://spark-master:7077
+    ports:
+      - "8082:8081"  # Web UI
+    networks:
+      - voting_network
+
+volumes:
+  postgres_data:
+
+networks:
+  voting_network:
+    driver: bridge
