@@ -103,18 +103,20 @@ conda env update -f environment.yml --prune
 - Make sure Docker Desktop is running first (you need to start Docker Desktop application)
 - Open Anaconda Prompt and navigate to your project directory
 ```bash
-# Start all services
-docker-compose up -d
+# Build and start all services (will rebuild dashboard / simulator images)
+docker-compose up --build -d
 
-# Create topics
-docker exec -it voting_kafka kafka-topics --create --bootstrap-server localhost:9092 --topic voters_topic --partitions 1 --replication-factor 1
+# dashboard is exposed on http://localhost:8501
+# simulator container will automatically run the vote generator script
 
-docker exec -it voting_kafka kafka-topics --create --bootstrap-server localhost:9092 --topic candidates_topic --partitions 1 --replication-factor 1
-
-docker exec -it voting_kafka kafka-topics --create --bootstrap-server localhost:9092 --topic votes_topic --partitions 1 --replication-factor 1
-
-docker exec -it voting_kafka kafka-topics --create --bootstrap-server localhost:9092 --topic aggregated_votes_per_candidate --partitions 1 --replication-factor 1
-
+# Create required Kafka topics (loop handles existing topics gracefully)
+for topic in voters_topic candidates_topic votes_topic \
+             aggregated_votes_per_candidate aggregated_turnout_by_location; do
+  docker exec -it voting_kafka \
+    kafka-topics --create --bootstrap-server localhost:9092 \
+    --topic "$topic" --partitions 1 --replication-factor 1 || true
+done
+```
 docker exec -it voting_kafka kafka-topics --create --bootstrap-server localhost:9092 --topic aggregated_turnout_by_location --partitions 1 --replication-factor 1
 
 # Verify topics were created

@@ -1,0 +1,15 @@
+pandas
+numpy
+psycopg2-binary
+requests
+streamlit
+pyspark==3.5.0
+matplotlib
+confluent-kafka
+streamlit-autorefresh
+simplejson
+kafka-python
+geopandas
+fpdf
+plotly
+altair
