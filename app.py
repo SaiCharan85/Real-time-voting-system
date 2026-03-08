@@ -5,18 +5,12 @@ import pandas as pd
 import plotly.express as px
 import altair as alt
 from datetime import datetime, timedelta
-import time
 from streamlit_autorefresh import st_autorefresh
 import geopandas as gpd
-from plotly.subplots import make_subplots
-import plotly.graph_objects as go
 from fpdf import FPDF
-import base64
 from io import BytesIO
-import plotly.io as pio
-import zipfile
 
-# Create a connection pool
+# Create a connection pool once per session
 @st.cache_resource
 def init_connection_pool():
     try:
@@ -32,35 +26,22 @@ def init_connection_pool():
         st.error(f"Failed to create connection pool: {e}")
         return None
 
-# Function to get a connection from the pool
-def get_db_conn():
-    try:
-        return init_connection_pool().getconn()
-    except Exception as e:
-        st.error(f"Failed to get database connection: {e}")
-        return None
-
-# Function to return a connection to the pool
-def put_db_conn(conn):
-    try:
-        init_connection_pool().putconn(conn)
-    except Exception as e:
-        st.error(f"Failed to return connection to pool: {e}")
-
-# Function to execute query and return DataFrame
-def execute_query(query):
-    conn = None
-    try:
-        conn = get_db_conn()
-        if conn:
-            return pd.read_sql_query(query, conn)
+# Helper for running a SQL query and returning a DataFrame.
+# The pool is fetched once and connections are returned promptly.
+def execute_query(query: str) -> pd.DataFrame:
+    pool = init_connection_pool()
+    if pool is None:
         return pd.DataFrame()
+
+    conn = pool.getconn()
+    try:
+        return pd.read_sql_query(query, conn)
     except Exception as e:
         st.error(f"Query execution error: {e}")
         return pd.DataFrame()
     finally:
-        if conn:
-            put_db_conn(conn)
+        # always put connection back even if read_sql_query raises
+        pool.putconn(conn)
 
 # Modified data fetching functions
 @st.cache_data(ttl=30)
@@ -223,44 +204,29 @@ def get_demographic_data():
 
 @st.cache_data(ttl=30)
 def get_candidate_info():
-    candidate_data = execute_query("""
+    return execute_query("""
     SELECT first_name, last_name, party, age, gender, biography, img_url
     FROM candidate
     """)
-    return candidate_data
 
+@st.cache_data(ttl=30)
 def get_state_voting_details():
-    df= execute_query("""
-    WITH state_votes AS (
-        SELECT 
-            v.address_state,
-            c.party,
-            COUNT(*) as votes,
-            ROUND(AVG(v.age), 1) as avg_age,
-            ROUND(100.0 * COUNT(CASE WHEN v.gender = 'male' THEN 1 END) / COUNT(*), 1) as male_pct
-        FROM vote vt
-        JOIN voter v ON vt.voter_id = v.voter_id
-        JOIN candidate c ON vt.candidate_id = c.candidate_id
-        GROUP BY v.address_state, c.party
-    )
-    SELECT 
-        s.address_state as "State",
-        COALESCE(sv1.votes, 0) as "Management Party",
-        COALESCE(sv2.votes, 0) as "Liberation Party",
-        COALESCE(sv3.votes, 0) as "United Republic Party",
-        COALESCE(sv1.votes, 0) + COALESCE(sv2.votes, 0) + COALESCE(sv3.votes, 0) as "Total Votes",
-        ROUND(AVG(COALESCE(sv1.avg_age, 0) + COALESCE(sv2.avg_age, 0) + COALESCE(sv3.avg_age, 0)) / 3, 1) as "Avg Age",
-        ROUND(AVG(COALESCE(sv1.male_pct, 0) + COALESCE(sv2.male_pct, 0) + COALESCE(sv3.male_pct, 0)) / 3, 1) as "Male %"
-    FROM (SELECT DISTINCT address_state FROM voter) s
-    LEFT JOIN state_votes sv1 ON s.address_state = sv1.address_state AND sv1.party = 'Management Party'
-    LEFT JOIN state_votes sv2 ON s.address_state = sv2.address_state AND sv2.party = 'Liberation Party'
-    LEFT JOIN state_votes sv3 ON s.address_state = sv3.address_state AND sv3.party = 'United Republic Party'
-    GROUP BY 
-        s.address_state,
-        sv1.votes, sv2.votes, sv3.votes
-    ORDER BY s.address_state;
+    # simplified version using filter aggregates instead of multiple joins
+    return execute_query("""
+    SELECT
+        v.address_state AS "State",
+        COUNT(*) FILTER (WHERE c.party = 'Management Party') AS "Management Party",
+        COUNT(*) FILTER (WHERE c.party = 'Liberation Party') AS "Liberation Party",
+        COUNT(*) FILTER (WHERE c.party = 'United Republic Party') AS "United Republic Party",
+        COUNT(*) AS "Total Votes",
+        ROUND(AVG(v.age), 1) AS "Avg Age",
+        ROUND(100.0 * COUNT(*) FILTER (WHERE v.gender = 'male') / NULLIF(COUNT(*),0), 1) AS "Male %"
+    FROM vote vt
+    JOIN voter v ON vt.voter_id = v.voter_id
+    JOIN candidate c ON vt.candidate_id = c.candidate_id
+    GROUP BY v.address_state
+    ORDER BY v.address_state
     """)
-    return df
 
 # Define page config and constants
 st.set_page_config(
@@ -279,7 +245,16 @@ PARTY_COLORS = {
     'Management Party': '#87CEEB'     # Light Blue
 }
 
+# cache heavy external resources
+@st.cache_data(ttl=3600)
+def load_us_states():
+    url = (
+        'https://raw.githubusercontent.com/PublicaMundi/MappingAPI/master/data/geojson/us-states.json'
+    )
+    return gpd.read_file(url)
+
 def generate_dashboard_pdf():
+    # generate in‑memory to avoid filesystem overhead
     try:
         class VotingDashboardPDF(FPDF):
             def header(self):
@@ -292,50 +267,44 @@ def generate_dashboard_pdf():
                 self.set_font('Arial', 'I', 8)
                 self.cell(0, 10, f'Generated on {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}', 0, 0, 'C')
 
-        # Create PDF object
         pdf = VotingDashboardPDF()
-        
-        # Add first page
         pdf.add_page()
-        
-        # Add summary metrics
+
+        # summary metrics
         pdf.set_font('Arial', '', 12)
         total_votes, last_update, _ = get_total_votes()
         pdf.cell(0, 10, f'Total Votes: {total_votes:,}', 0, 1)
         pdf.cell(0, 10, f'Last Updated: {last_update}', 0, 1)
         pdf.ln(5)
 
-        # Add vote distribution
+        # distribution
         votes_by_candidate = get_votes_by_candidate()
         if not votes_by_candidate.empty:
             pdf.set_font('Arial', 'B', 14)
             pdf.cell(0, 10, 'Vote Distribution by Party', 0, 1)
-            
             pdf.set_font('Arial', '', 10)
             for _, row in votes_by_candidate.iterrows():
-                pdf.cell(0, 8, 
-                    f"{row['first_name']} {row['last_name']} ({row['party']}): {row['vote_count']:,} votes ({row['percentage']}%)", 
-                    0, 1)
+                pdf.cell(
+                    0,
+                    8,
+                    f"{row['first_name']} {row['last_name']} ({row['party']}): {row['vote_count']:,} votes ({row['percentage']}%)",
+                    0,
+                    1
+                )
             pdf.ln(5)
 
-        # Add state-level information
         pdf.add_page()
         pdf.set_font('Arial', 'B', 14)
         pdf.cell(0, 10, 'State-Level Voting Details', 0, 1)
-        
         state_data = get_state_voting_details()
         if not state_data.empty:
             pdf.set_font('Arial', '', 9)
             col_width = 36
             row_height = 7
-            
-            # Table headers
             headers = ['State', 'Total Votes', 'Lib. Party', 'Rep. Party', 'Mgt. Party']
             for header in headers:
                 pdf.cell(col_width, row_height, header, 1, 0, 'C')
             pdf.ln()
-            
-            # Table data
             for _, row in state_data.iterrows():
                 pdf.cell(col_width, row_height, str(row['State'])[:15], 1)
                 pdf.cell(col_width, row_height, str(row['Total Votes']), 1)
@@ -344,19 +313,9 @@ def generate_dashboard_pdf():
                 pdf.cell(col_width, row_height, str(row['Management Party']), 1)
                 pdf.ln()
 
-        # Save the PDF to a temporary file
-        temp_pdf = "temp_dashboard.pdf"
-        pdf.output(temp_pdf)
-        
-        # Read the temporary file and return its contents
-        with open(temp_pdf, 'rb') as file:
-            pdf_data = file.read()
-        
-        # Remove the temporary file
-        import os
-        os.remove(temp_pdf)
-        
-        return pdf_data
+        buffer = BytesIO()
+        pdf.output(buffer)
+        return buffer.getvalue()
 
     except Exception as e:
         st.error(f"Error generating PDF: {str(e)}")
@@ -365,34 +324,27 @@ def generate_dashboard_pdf():
 # download button code
 def create_download_buttons():
     st.sidebar.markdown("### Download Options")
-    
-    # Get data outside the button callbacks
-    votes_data = get_votes_by_candidate()
-    
-    # CSV Download - Direct download
+
+    votes_data = get_votes_by_candidate()  # cached, cheap
     csv_data = votes_data.to_csv(index=False).encode('utf-8') if not votes_data.empty else None
     st.sidebar.download_button(
         label="Download Data (CSV)",
-        data=csv_data if csv_data else "No data available",
+        data=csv_data or "No data available",
         file_name=f"voting_data_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
         mime="text/csv",
         disabled=votes_data.empty,
         type="primary"
     )
 
-    # PDF Download - Direct download
-    try:
-        pdf_data = generate_dashboard_pdf()
-        st.sidebar.download_button(
-            label="Download Data (PDF)",
-            data=pdf_data if pdf_data else "No data available",
-            file_name=f"voting_dashboard_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
-            mime="application/pdf",
-            disabled=pdf_data is None,
-            type="secondary"
-        )
-    except Exception as e:
-        st.sidebar.error(f"Error preparing PDF: {str(e)}")
+    pdf_data = generate_dashboard_pdf()
+    st.sidebar.download_button(
+        label="Download Data (PDF)",
+        data=pdf_data or "No data available",
+        file_name=f"voting_dashboard_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
+        mime="application/pdf",
+        disabled=pdf_data is None,
+        type="secondary"
+    )
         
 def main():
     # Sidebar
@@ -416,10 +368,16 @@ def main():
     # Top metrics row
     col1, col2, col3, col4 = st.columns(4)
     
+    # pre‑fetch tables that will be reused
+    candidate_info_df = get_candidate_info()
+
+    # pre‑compute geographical info once
+    votes_by_state, leading_party = get_geographical_data()
+
     with st.spinner("Loading metrics..."):
         total_votes, last_update, hourly_change = get_total_votes()
         votes_by_candidate = get_votes_by_candidate()
-        
+
         # Total Votes
         with col1:
             st.metric(
@@ -427,46 +385,36 @@ def main():
                 f"{total_votes:,}",
                 delta=f"{hourly_change:+,} in last hour" if hourly_change else None
             )
-        
+
         # Leading Candidate
-        # In the metrics section
         with col2:
             if not votes_by_candidate.empty:
                 leader = votes_by_candidate.iloc[0]
-                # Create two columns for image and info
                 img_col, info_col = st.columns([1, 4])
-                
                 with img_col:
-                    # Get candidate image
-                    candidate_info = execute_query(f"""
-                        SELECT img_url 
-                        FROM candidate 
-                        WHERE first_name = '{leader['first_name']}' 
-                        AND last_name = '{leader['last_name']}'
-                    """)
-                    if not candidate_info.empty and candidate_info.iloc[0]['img_url']:
-                        st.image(candidate_info.iloc[0]['img_url'], width=50)
-                
+                    img_row = candidate_info_df.loc[
+                        (candidate_info_df.first_name == leader['first_name']) &
+                        (candidate_info_df.last_name == leader['last_name'])
+                    ]
+                    if not img_row.empty and img_row.iloc[0]['img_url']:
+                        st.image(img_row.iloc[0]['img_url'], width=50)
                 with info_col:
                     st.metric(
                         "Leading Candidate",
                         f"{leader['first_name']} {leader['last_name']}",
                         f"{leader['party']} ({leader['percentage']}%)"
                     )
-                    # Add vote count below metric
                     st.write(f"{leader['vote_count']} votes")
-                    
-        
+
         # Active States
         with col3:
-            votes_by_state, _ = get_geographical_data()
             active_states = len(votes_by_state) if not votes_by_state.empty else 0
             st.metric(
                 "Active States",
                 active_states,
                 "Currently Voting"
             )
-        
+
         # Last Updated
         with col4:
             st.metric(
@@ -559,9 +507,9 @@ def main():
         
         if not votes_by_state.empty and not leading_party.empty:
             try:
-                # Load US states geometry
-                us_states = gpd.read_file('https://raw.githubusercontent.com/PublicaMundi/MappingAPI/master/data/geojson/us-states.json')
-                
+                # Load US states geometry (cached)
+                us_states = load_us_states()
+
                 with map_col1:
                     st.write("Total Votes by State")
                     merged_data = us_states.merge(
