@@ -341,12 +341,21 @@ This file using Streamlit to create web-page dashboard.
 
 ### 8. Download Options
 - CSV data export functionality
-- PDF dashboard report generation
+- **PDF dashboard report generation** (in‑memory, includes summary metrics and state table)
 
 ![Download Panel](images/download-options.png)
 
 - Sample PDF file: [example pdf](https://github.com/thaovy1508/RealTime-Voting-System/blob/main/docs/pdf-sample.pdf)
 - Sample CSV file: [example csv](https://github.com/thaovy1508/RealTime-Voting-System/blob/main/docs/csv-sample.csv)
+
+### 9. Kafka Integration
+- Producers use `confluent_kafka.SerializingProducer` with optimized settings:
+  - batching (`linger.ms`, `batch.num.messages`, `queue.buffering.max.*`)
+  - idempotence (`acks=all`, `enable.idempotence=True`)
+  - string serialization for keys/values
+- Messages are buffered and polled periodically instead of flushing per message
+- Delivery callbacks report errors without blocking the simulation
+- Flush occurs only during clean-up or when buffer thresholds are reached
 
 ### 9. Control Features
 - Time range selection

@@ -503,8 +503,7 @@ def main():
     map_col1, map_col2 = st.columns(2)
     
     with st.spinner("Loading geographical data..."):
-        votes_by_state, leading_party = get_geographical_data()
-        
+        # values already pre‑fetched for metrics
         if not votes_by_state.empty and not leading_party.empty:
             try:
                 # Load US states geometry (cached)
@@ -629,37 +628,39 @@ def main():
     if search_state:
         state_details = state_details[state_details['State'].str.contains(search_state, case=False)]
 
-    # Function to create alternating backgrounds
-    def highlight_rows(row):
-        if row.name % 2 == 0:
-            return ['background-color: rgba(242, 245, 250, 1)'] * len(row)
-        return [''] * len(row)
+    @st.cache_data(ttl=30)
+    def style_state_details(df):
+        def highlight_rows(row):
+            return ['background-color: rgba(242, 245, 250, 1)'] * len(row) if row.name % 2 == 0 else [''] * len(row)
 
-    # Style the dataframe using Pandas styling
-    styled_df = state_details.style\
-        .apply(highlight_rows, axis=1)\
-        .set_properties(**{
-            'padding': '8px 12px',
-            'font-size': '14px'
-        })\
-        .set_table_styles([
-            {'selector': 'th', 'props': [
-                ('background-color', 'white'),
-                ('color', 'rgb(49, 51, 63)'),
-                ('font-weight', 'normal'),
-                ('border-bottom', '1px solid #ddd'),
-                ('padding', '8px 12px'),
-                ('font-size', '14px')
-            ]},
-            {'selector': 'td', 'props': [
-                ('border', 'none')
-            ]},
-            {'selector': 'table', 'props': [
-                ('border-collapse', 'collapse'),
-                ('border', 'none')
-            ]}
-        ])\
-        .hide(axis="index")
+        return (
+            df.style
+              .apply(highlight_rows, axis=1)
+              .set_properties(**{
+                  'padding': '8px 12px',
+                  'font-size': '14px'
+              })
+              .set_table_styles([
+                  {'selector': 'th', 'props': [
+                      ('background-color', 'white'),
+                      ('color', 'rgb(49, 51, 63)'),
+                      ('font-weight', 'normal'),
+                      ('border-bottom', '1px solid #ddd'),
+                      ('padding', '8px 12px'),
+                      ('font-size', '14px')
+                  ]},
+                  {'selector': 'td', 'props': [
+                      ('border', 'none')
+                  ]},
+                  {'selector': 'table', 'props': [
+                      ('border-collapse', 'collapse'),
+                      ('border', 'none')
+                  ]}
+              ])
+              .hide(axis="index")
+        )
+
+    styled_df = style_state_details(state_details)
 
     # Display the styled dataframe
     st.dataframe(

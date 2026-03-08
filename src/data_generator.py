@@ -22,10 +22,23 @@ class ContinuousVoteSimulator:
         )
         self.db_cur = self.db_conn.cursor()
         
-        # Kafka producer
+        # Kafka producer with optimized settings
+        from confluent_kafka.serialization import StringSerializer
+
         self.producer = SerializingProducer({
-            'bootstrap.servers': 'localhost:9092'
+            'bootstrap.servers': 'localhost:9092',
+            'key.serializer': StringSerializer('utf_8'),
+            'value.serializer': StringSerializer('utf_8'),
+            # batching/latency trade‑offs
+            'linger.ms': 5,                # wait up to 5ms for more messages
+            'batch.num.messages': 1000,    # flush batches of up to 1k messages
+            'queue.buffering.max.ms': 100, # max time to buffer
+            'queue.buffering.max.messages': 100000,
+            'acks': 'all',                 # strong durability
+            'enable.idempotence': True     # avoid duplicates on retries
         })
+        # counter used to trigger occasional flush/poll
+        self._pending_msgs = 0
         
         # Initialize candidates if needed
         self.initialize_candidates()
@@ -129,6 +142,20 @@ class ContinuousVoteSimulator:
         else:
             raise Exception("Failed to fetch voter data")
 
+    def _send_kafka(self, topic, key, value):
+        """Internal helper that produces a message and periodically services the queue."""
+        try:
+            self.producer.produce(topic, key=key, value=value, on_delivery=self.kafka_delivery_report)
+            self._pending_msgs += 1
+            # poll with zero timeout to trigger callbacks; flush occasionally
+            if self._pending_msgs >= 200:
+                self.producer.poll(0)
+                # a short flush to avoid unbounded queue growth
+                self.producer.flush(0)
+                self._pending_msgs = 0
+        except Exception as err:
+            print(f"Kafka produce error: {err}")
+
     def register_voter(self, voter):
         """Register a new voter in the system"""
         try:
@@ -147,14 +174,8 @@ class ContinuousVoteSimulator:
             ))
             self.db_conn.commit()
 
-            # Send to Kafka
-            self.producer.produce(
-                'voters_topic',
-                key=voter['voter_id'],
-                value=json.dumps(voter),
-                on_delivery=self.kafka_delivery_report
-            )
-            self.producer.flush()
+            # Send to Kafka (asynchronously)
+            self._send_kafka('voters_topic', voter['voter_id'], json.dumps(voter))
             return True
 
         except Exception as e:
@@ -242,14 +263,8 @@ class ContinuousVoteSimulator:
             ))
             self.db_conn.commit()
 
-            # Send to Kafka
-            self.producer.produce(
-                'votes_topic',
-                key=vote_data['vote_id'],  # Changed to use vote_id as key
-                value=json.dumps(vote_data),
-                on_delivery=self.kafka_delivery_report
-            )
-            self.producer.flush()
+            # Send to Kafka asynchronously
+            self._send_kafka('votes_topic', vote_data['vote_id'], json.dumps(vote_data))
             return True
 
         except Exception as e:
@@ -311,6 +326,11 @@ class ContinuousVoteSimulator:
 
     def cleanup(self):
         """Clean up database and Kafka connections"""
+        # ensure all buffered messages are delivered
+        try:
+            self.producer.flush()
+        except Exception:
+            pass
         self.db_cur.close()
         self.db_conn.close()
 
